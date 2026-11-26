@@ -242,7 +242,10 @@ async def analyze_url_endpoint(req: AnalyzeRequest):
         legitimacy = domain_result.get("legitimacy") or {}
         parent_genuine = bool(legitimacy.get("verified_genuine") and
                               result.get("unified_verdict") == "Likely safe")
-        description = describe_site(fetched_html, parent_url,
+        http = domain_result.get("http") or {}
+        descriptive_html = fetched_html if (200 <= (http.get("status_code") or 0) < 300
+                                             and "html" in http.get("content_type", "").lower()) else ""
+        description = describe_site(descriptive_html, parent_url,
                                     reachable=bool((domain_result.get("http") or {}).get("reachable")))
         subpages = await run_in_threadpool(
             inspect_subpages, parent_url, domain_result.get("registered_domain"),

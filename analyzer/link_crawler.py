@@ -190,7 +190,7 @@ def inspect_subpages(parent_url: str, parent_registered_domain: str | None,
                 "verified_count": 0, "flagged_count": 0, "total_count": 0, "links": []}
     origin = urljoin(parent_url, "/")
     if homepage_html is None:
-        fetched = _checked_request(origin)
+        fetched = _checked_request(parent_url)
         if not fetched.get("reachable"):
             return {"enabled": False, "message": "The parent page could not be fetched for subpage discovery.",
                     "verified_count": 0, "flagged_count": 0, "total_count": 0, "links": []}
@@ -207,7 +207,7 @@ def inspect_subpages(parent_url: str, parent_registered_domain: str | None,
         href = anchor.get("href", "").strip()
         if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
             continue
-        absolute, _fragment = urldefrag(urljoin(origin, href))
+        absolute, _fragment = urldefrag(urljoin(parent_url, href))
         parsed = urlparse(absolute)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             continue

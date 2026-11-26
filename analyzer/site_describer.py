@@ -23,11 +23,11 @@ def _clean(text: str) -> str:
 
 def describe_site(html: str | None, final_url: str | None, reachable: bool = True) -> dict:
     """Build a 2–3 sentence extractive summary; never invent unreachable content."""
-    if not reachable or not html:
+    if not reachable:
         return {"available": False, "category": "Unknown",
                 "description": "The website is unreachable, so no description is available."}
-    soup = BeautifulSoup(html[:512 * 1024], "html.parser")
-    for node in soup(["script", "style", "noscript", "svg", "iframe"]):
+    soup = BeautifulSoup((html or "")[:512 * 1024], "html.parser")
+    for node in soup(["script", "style", "noscript", "svg", "iframe", "nav", "footer", "aside", "form"]):
         node.decompose()
     for node in soup.find_all(attrs={"hidden": True}):
         node.decompose()
@@ -53,16 +53,29 @@ def describe_site(html: str | None, final_url: str | None, reachable: bool = Tru
         count = sum(term in evidence for term in terms)
         if count > best:
             category, best = label, count
-    chosen = description or (". ".join(headings[:2])) or visible
-    if title and chosen and title.lower() not in chosen.lower():
-        chosen = f"{title}: {chosen}"
-    if not chosen:
-        chosen = f"The page at {final_url or 'this address'} contains no readable description text."
-    # Truncate at a sentence boundary when possible; keep the source-derived text.
-    chosen = _clean(chosen)
-    if len(chosen) > 420:
-        sentence = re.split(r"(?<=[.!?])\s+", chosen[:420])
-        chosen = " ".join(sentence[:-1]) if len(sentence) > 1 else chosen[:417].rstrip() + "..."
-    return {"available": True, "category": category,
-            "description": chosen, "source": "Page title, metadata, headings, and visible text"}
-
+    # Prefer a sentence explaining a service over a welcome slogan or a navigation label.
+    main = soup.find("main") or soup.find("article") or soup
+    paragraphs = [node.get_text(" ", strip=True) for node in main.find_all("p", limit=25)]
+    purpose = re.compile(r"\b(helps?|allows?|lets?|provides?|offers?|connects?|enables?|"
+                         r"find|search|book|learn|compare|track|sell|buy|manage|create|"
+                         r"teaches?|publishes?|platform|marketplace|library|directory)\b", re.I)
+    boilerplate = re.compile(r"accept (all )?cookies|cookie preferences|enable javascript|"
+                             r"verify you are human|all rights reserved", re.I)
+    candidates = []
+    for passage in [description, *paragraphs, *headings, title]:
+        for sentence in re.split(r"(?<=[.!?])\s+", _clean(passage)):
+            if len(sentence.split()) < 4 or boilerplate.search(sentence):
+                continue
+            candidates.append((bool(purpose.search(sentence)), sentence))
+    if not candidates:
+        return {"available": False, "category": "Unknown",
+                "description": "The page has too little descriptive text to explain what this website does."}
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    sentences = list(dict.fromkeys(sentence for _, sentence in candidates))
+    summary = sentences[0]
+    if len(sentences) > 1 and candidates[0][0] and purpose.search(sentences[1]) and len(summary + sentences[1]) < 300:
+        summary = summary.rstrip(".") + ". " + sentences[1]
+    if len(summary) > 320:
+        summary = summary[:317].rsplit(" ", 1)[0] + "..."
+    return {"available": True, "category": category, "description": summary,
+            "source": "Website metadata and visible page text"}

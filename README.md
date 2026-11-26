@@ -79,8 +79,7 @@ is an additional signal when the optional WHOIS lookup returns a creation date.
 
 Every submitted hostname is checked for DNS and basic reachability. Enable the
 separate page-sandbox checkbox for the existing additional page inspection.
-The root page response is used for an extractive description when it is
-reachable. The depth-one subpage crawl runs only when the parent has passed the
+The submitted page (including its path and query) supplies the description. The report prioritizes sentences explaining what the service offers or lets visitors do. The depth-one subpage crawl runs only when the parent has passed the
 legitimacy evidence checks and the hybrid detector reports Likely safe.
 
 Illustrative response for a missing domain (a candidate appears only if every

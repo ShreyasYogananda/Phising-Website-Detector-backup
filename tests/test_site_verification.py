@@ -116,3 +116,11 @@ class TestSubpageVerification(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+def test_description_explains_service_from_submitted_page():
+    parsed = domain_checker.parse_user_input("https://example.org/tools/search?q=books#results")
+    assert parsed["normalized_url"] == "https://example.org/tools/search?q=books"
+    page = ('<meta name="description" content="Welcome to our official website.">'
+            '<main><p>This library helps students find and borrow textbooks.</p></main>')
+    assert describe_site(page, parsed["normalized_url"])["description"] == (
+        "This library helps students find and borrow textbooks.")

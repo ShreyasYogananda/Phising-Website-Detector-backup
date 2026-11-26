@@ -75,7 +75,10 @@ def parse_user_input(value: str) -> dict[str, Any]:
         ip_literal = False
     ext = _EXTRACTOR(host)
     registered = f"{ext.domain}.{ext.suffix}" if ext.domain and ext.suffix else None
-    origin = urlunparse(("https", host, "/", "", "", ""))
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None:
+        authority += f":{port}"
+    origin = urlunparse((parsed.scheme, authority, parsed.path or "/", parsed.params, parsed.query, ""))
     return {"valid": True, "hostname": host, "registered_domain": registered,
             "normalized_url": origin, "blocked": False, "ip_literal": ip_literal}
 
@@ -419,7 +422,8 @@ def check_domain(value: str) -> dict[str, Any]:
     http = _checked_request(parsed["normalized_url"])
     # A domain may exist without HTTPS. Check plain HTTP only as a reachability
     # fallback; it can never satisfy the valid-TLS legitimacy requirement.
-    if not http.get("reachable") and not http.get("blocked"):
+    if (not http.get("reachable") and not http.get("blocked")
+            and value.strip().rstrip("/").lower() == host):
         http_fallback = _checked_request(f"http://{host}/")
         if http_fallback.get("reachable"):
             http = http_fallback
