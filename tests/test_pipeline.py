@@ -160,6 +160,27 @@ class TestAPI(unittest.TestCase):
         cls.app_module = app_module
         cls.client = TestClient(app_module.app)
 
+    def setUp(self):
+        from unittest import mock
+        # The app now checks DNS/HTTP before inference. Keep API tests hermetic
+        # and focused on route behavior by supplying a deterministic DNS result.
+        self.domain_check_patch = mock.patch.object(
+            self.app_module, "check_domain",
+            side_effect=lambda _url: {
+                "status": "exists", "exists": True, "message": "Mock domain resolves.",
+                "hostname": "example.com", "registered_domain": "example.com",
+                "dns": {"resolves": True, "blocked": False, "records": {"A": ["203.0.113.7"]}},
+                "http": {"reachable": False, "url": "https://example.com/", "error": "mocked"},
+                "legitimacy": {"verified_genuine": False, "confidence": "low", "reasons": []},
+                "suggestions": [],
+            }
+        )
+        self.domain_check_patch.start()
+
+    def tearDown(self):
+        if self.domain_check_patch is not None:
+            self.domain_check_patch.stop()
+
     def test_index_renders_with_samples_and_features(self):
         r = self.client.get("/")
         self.assertEqual(r.status_code, 200)
@@ -177,6 +198,22 @@ class TestAPI(unittest.TestCase):
     def test_pasted_whitespace_is_cleaned(self):
         r = self.client.post("/api/analyze", json={"url": " https://www.google.com/\n "})
         self.assertEqual(r.status_code, 200)
+
+    def test_nonresolving_domain_skips_prediction(self):
+        from unittest import mock
+        self.domain_check_patch.stop()
+        self.domain_check_patch = None
+        with mock.patch.object(self.app_module, "check_domain", return_value={
+            "status": "does_not_resolve", "exists": False,
+            "message": "netgame.edu does not resolve in DNS, so phishing prediction was skipped.",
+            "hostname": "netgame.edu", "registered_domain": "netgame.edu",
+            "dns": {"resolves": False, "error": "NXDOMAIN"}, "http": None,
+            "legitimacy": None, "suggestions": [],
+        }), mock.patch.object(self.app_module.RiskExplainer, "analyze_url") as predict:
+            response = self.client.post("/api/analyze", json={"url": "netgame.edu"})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["prediction_skipped"])
+        predict.assert_not_called()
 
     def test_batch(self):
         r = self.client.post("/api/batch", json={"urls": ["https://www.google.com", "http://paypal.com.verify-billing-center.xyz/"]})

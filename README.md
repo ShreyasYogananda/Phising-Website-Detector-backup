@@ -8,6 +8,10 @@ Paste a web address and PhishGuard tells you whether it looks like phishing, **w
 - **Explains itself.** Every verdict lists the rules that fired, the features that pushed the model's score up or down, and a URL anatomy strip that highlights the registered domain, `@` disguises and brand-in-subdomain tricks.
 - **Honest evaluation.** The benchmark tab shows precision, recall, F1, false-alarm rate (with 95% confidence intervals), confusion matrices, error rates per data source, and real mistakes with root causes, on two test sets: held-out *domains* and *older phishing campaigns*.
 - **Optional live-page inspection** in an SSRF-hardened sandbox (see Security).
+- **Domain existence before prediction.** DNS A/AAAA/CNAME/NS lookup runs first, followed by a bounded HTTPS/HTTP reachability check. Names that do not resolve are reported as unresolved and are not sent to the phishing model.
+- **Evidence-ranked alternatives.** For unresolved names and likely typos, the app tries common suffix and look-alike candidates. A suggestion is shown as verified only when it resolves, serves HTTPS with a valid certificate, appears in the configured local Tranco list, and has no too-recent WHOIS age when WHOIS returns one. These signals are evidence, not proof.
+- **Subpage verification.** When the parent passes the evidence checks and the existing detector says Likely safe, the app checks up to 30 depth-one internal links, prioritizes account/payment/help pages, honors robots.txt, and labels external services (including payment gateways) as Third-party.
+- **Extractive page description.** A category and short page-derived summary use metadata, headings, and visible text. Unreachable pages are described as unavailable; no LLM key is needed.
 
 ## Results (held-out test, 996 links)
 
@@ -31,7 +35,7 @@ On older campaigns the hybrid scores F1 0.97. See the *How well it works* tab or
 | Page sandbox | literal-IP check only | DNS-resolution check on every hop, manual redirect validation, scheme allow-list |
 | API | single endpoint | input validation, `/api/batch`, `/api/health`, error handling |
 | UI | dark SOC dashboard, out of sync with the model | rebuilt light/dark-aware "evidence report" UI with URL anatomy, accessible tabs, mobile layout |
-| Tests | 7 | 20 (API, detection quality on safe and phishing URLs, garbage input, SSRF) |
+| Tests | 7 | 30 (API, detection quality, SSRF, DNS suggestions, subpages and page descriptions) |
 
 ## Limitations (please read)
 
@@ -50,6 +54,9 @@ data/dataset_builder.py  Downloads feeds into data/cache/ and builds train/val/t
 features/extractor.py  41 features + URL anatomy
 models/                rule_based.py, ml_detector.py, explainer.py (score blending), trained_model.joblib
 evaluation/evaluator.py  Metrics, confidence intervals, per-source errors, error mining
+analyzer/domain_checker.py DNS/HTTPS existence, SSRF-safe redirects, Tranco/WHOIS evidence and suggestions
+analyzer/link_crawler.py  Depth-one robots-aware subpage inspection and page red flags
+analyzer/site_describer.py Extractive page description and category
 analyzer/page_analyzer.py  Optional isolated page inspection
 templates/, static/    UI
 tests/test_pipeline.py 20 automated tests
@@ -60,6 +67,44 @@ tests/test_pipeline.py 20 automated tests
 ```bash
 pip install -r requirements.txt
 python run.py                      # open http://127.0.0.1:8000
+```
+
+### Local Tranco list (for verified suggestions)
+
+This repository does not include the Tranco CSV. Put a Tranco export with
+`rank,domain` columns at `data/tranco.csv`, or point `TRANCO_CSV_PATH` at the
+file. The app does not download a list automatically. Without a matching local
+Tranco rank, it will not label an alternative as verified genuine. WHOIS age
+is an additional signal when the optional WHOIS lookup returns a creation date.
+
+Every submitted hostname is checked for DNS and basic reachability. Enable the
+separate page-sandbox checkbox for the existing additional page inspection.
+The root page response is used for an extractive description when it is
+reachable. The depth-one subpage crawl runs only when the parent has passed the
+legitimacy evidence checks and the hybrid detector reports Likely safe.
+
+Illustrative response for a missing domain (a candidate appears only if every
+verification check passes; the rank below is a placeholder for your local list):
+
+```text
+netgame.edu does not resolve in DNS, so phishing prediction was skipped.
+Did you mean https://netgame.com/ (high confidence; Tranco #<rank>)
+Reason: Tranco rank, validated HTTPS certificate, and WHOIS age when available.
+```
+
+### Request flow
+
+```mermaid
+flowchart TD
+  A[URL or domain input] --> B[Sanitize and parse with public suffix rules]
+  B --> C{DNS resolves?}
+  C -- No --> D[Skip ML; check verified alternatives]
+  C -- Yes --> E[Bounded HTTPS/HTTP reachability and TLS]
+  E --> F[Existing URL features + rules + ML hybrid]
+  F --> G[Extract page description]
+  F --> H{Parent has legitimacy evidence and low-risk verdict?}
+  H -- No --> I[Do not claim subpages genuine]
+  H -- Yes --> J[Robots-aware depth-one subpage verification]
 ```
 
 Other commands:
@@ -75,7 +120,7 @@ python train_model.py              # retrain after rebuilding the data
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/api/analyze` | `{"url": "...", "enable_page_analysis": false}` returns verdict, score, evidence, anatomy |
+| POST | `/api/analyze` | `{"url": "...", "enable_page_analysis": false}` returns DNS/HTTP evidence, suggestions, description, subpage table, then the existing verdict if DNS resolves |
 | POST | `/api/batch` | `{"urls": [...]}` (max 25) returns verdict and score per URL |
 | GET | `/api/evaluation` | Stored benchmark |
 | POST | `/api/evaluation/recalculate` | Recompute the benchmark from the CSVs |
@@ -87,7 +132,18 @@ Interactive docs: `/docs`.
 
 ## Security notes
 
-The optional page inspection fetches a user-supplied URL, so it is restricted: http/https only; every hop (including redirects) is checked against loopback, private, link-local, carrier-grade NAT and reserved ranges, both as IP literals and after DNS resolution; 2.5 s timeout, 3 redirects maximum, 500 KB read cap; scripts are never executed. A DNS-rebinding race between lookup and connect remains theoretically possible, so deploy the service without access to sensitive internal networks. The UI builds all dynamic content with `textContent`, so URLs and API responses are never interpreted as HTML.
+Domain verification and subpage checks make outbound requests to user-entered or derived candidate hosts. Only http/https and standard ports are accepted; every request and redirect is checked against loopback, private, link-local, carrier-grade NAT and reserved ranges before connecting; timeouts and a 512 KB response cap apply; HTTPS certificate validation stays enabled; scripts are never executed. The subpage crawler is depth one, limited to 30 links, and honors fetched robots.txt rules. A DNS-rebinding race between lookup and connect remains theoretically possible, so deploy the service without access to sensitive internal networks. Tranco rank, DNS existence, age and TLS do not guarantee that all content is legitimate. The UI builds dynamic content with `textContent`, so URLs and API responses are never interpreted as HTML.
+
+## Tests
+
+```bash
+python -m pytest -q tests
+```
+
+The network-related tests mock DNS and HTTP responses. They cover an unresolved
+`netgame.edu` with a verified `netgame.com` candidate, typosquat suggestions,
+safe and suspicious subpages, external payment gateways, unreachable pages,
+and refusal to infer a page description when content is unavailable.
 
 ## Reference
 
