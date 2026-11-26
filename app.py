@@ -25,8 +25,12 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from analyzer.page_analyzer import inspect_live_page_isolated
+from analyzer.domain_checker import check_domain
+from analyzer.link_crawler import inspect_subpages
+from analyzer.site_describer import describe_site
 from evaluation.evaluator import load_evaluation_results, run_evaluation
 from features.extractor import get_feature_names
 from models.explainer import RiskExplainer
@@ -200,6 +204,31 @@ async def analyze_url_endpoint(req: AnalyzeRequest):
     if len(url) > MAX_URL_LENGTH:
         return validation_error(f"That URL is too long (limit {MAX_URL_LENGTH} characters).")
 
+    # Existence is checked before inference. A non-resolving name gets a clear
+    # result and verified alternatives, never an invented phishing prediction.
+    try:
+        domain_result = await run_in_threadpool(check_domain, url)
+    except Exception:
+        log.exception("domain verification failed for %r", url[:200])
+        return validation_error("Could not verify the domain right now. No phishing prediction was made.", 503)
+    if domain_result["status"] == "invalid":
+        return validation_error(domain_result["message"])
+    if not domain_result["exists"]:
+        domain_result["http"] = None
+        return {
+            "domain_check": domain_result,
+            "prediction_skipped": True,
+            "summary_statement": "The hostname does not currently resolve. No phishing score was calculated.",
+            "site_description": describe_site(None, None, reachable=False),
+            "subpage_verification": {"enabled": False, "message": "Subpages cannot be checked for a non-resolving hostname.",
+                                     "verified_count": 0, "flagged_count": 0, "total_count": 0, "links": []},
+            "disclaimer": "DNS and popularity signals are evidence, not proof that a site is safe.",
+        }
+
+    # Keep the already-fetched HTML internal for description and crawl reuse;
+    # it is deliberately removed before the result is serialized to the client.
+    fetched_html = (domain_result.get("http") or {}).pop("body", "")
+    parent_url = (domain_result.get("http") or {}).get("url") or domain_result.get("normalized_url") or url
     page_result = None
     if req.enable_page_analysis:
         try:
@@ -209,7 +238,20 @@ async def analyze_url_endpoint(req: AnalyzeRequest):
             page_result = {"status": "error", "message": "Page inspection failed.", "findings": []}
 
     try:
-        return RiskExplainer.analyze_url(url, page_analysis_result=page_result)
+        result = RiskExplainer.analyze_url(url, page_analysis_result=page_result)
+        legitimacy = domain_result.get("legitimacy") or {}
+        parent_genuine = bool(legitimacy.get("verified_genuine") and
+                              result.get("unified_verdict") == "Likely safe")
+        description = describe_site(fetched_html, parent_url,
+                                    reachable=bool((domain_result.get("http") or {}).get("reachable")))
+        subpages = await run_in_threadpool(
+            inspect_subpages, parent_url, domain_result.get("registered_domain"),
+            parent_genuine, fetched_html)
+        result["domain_check"] = domain_result
+        result["prediction_skipped"] = False
+        result["site_description"] = description
+        result["subpage_verification"] = subpages
+        return result
     except Exception:
         log.exception("analysis failed for %r", url[:200])
         return validation_error("Could not analyse that URL.", 500)
@@ -229,6 +271,12 @@ async def analyze_batch(req: BatchRequest):
             results.append({"url": u[:80] + "…", "error": "URL too long"})
             continue
         try:
+            domain_result = await run_in_threadpool(check_domain, u)
+            if not domain_result.get("exists"):
+                results.append({"url": u, "domain_check": domain_result["status"],
+                                "suggestions": domain_result.get("suggestions", []),
+                                "prediction_skipped": True})
+                continue
             r = RiskExplainer.analyze_url(u)
             results.append({
                 "url": u,

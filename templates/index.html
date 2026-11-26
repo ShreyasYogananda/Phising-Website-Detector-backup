@@ -32,7 +32,7 @@
   <section id="v-check" role="tabpanel" aria-labelledby="t-check">
     <div class="hero">
       <h1>Check a link before you click it.</h1>
-      <p class="lede">Paste any web address. PhishGuard reads it the way an investigator would, shows which part of it you would really be visiting, and lists every warning sign it found.</p>
+      <p class="lede">Paste a web address. PhishGuard first checks whether its domain resolves and makes a bounded reachability request, then explains the address and warning signs. It extracts a short description from a reachable page; detailed subpage checks run only when the parent passes the legitimacy evidence checks.</p>
 
       <form id="check-form" class="check-form" novalidate>
         <label for="url-input" class="sr-only">Web address to check</label>
@@ -44,7 +44,7 @@
         <div class="form-row">
           <label class="opt">
             <input type="checkbox" id="page-check">
-            <span>Also look at the live page. Fetches the page from our server in an isolated sandbox: no scripts run, private networks are blocked, 3 redirects at most.</span>
+            <span>Also run the detailed page sandbox check. The basic DNS and reachability check is always performed; this option adds page-level signals. No scripts run, private networks are blocked, and redirects are rechecked.</span>
           </label>
         </div>
         <p class="form-error" id="form-error" role="alert"></p>
@@ -68,6 +68,25 @@
     </div>
 
     <div id="results" hidden aria-live="polite">
+      <section class="block" id="domain-check-block">
+        <h3>Does this domain exist?</h3>
+        <p id="domain-check-message" class="sub"></p>
+        <dl class="facts" id="domain-check-facts"></dl>
+        <div id="suggestions-wrap" hidden>
+          <h4>Verified alternatives</h4>
+          <ul id="suggestions-list"></ul>
+          <p class="sub">Popularity and TLS checks are evidence, not proof that a page is safe.</p>
+        </div>
+        <p id="suggestions-message" class="sub"></p>
+      </section>
+
+      <section class="block" id="description-block">
+        <h3>About this website</h3>
+        <p class="sub" id="site-category"></p>
+        <p id="site-description"></p>
+      </section>
+
+      <div id="prediction-content">
       <div class="verdict" id="verdict">
         <h2 id="v-title"></h2>
         <p class="statement" id="v-statement"></p>
@@ -131,12 +150,24 @@
         <div id="page-findings" style="margin-top:14px"></div>
       </section>
 
+      <section class="block" id="subpages-block">
+        <h3>Subpage verification</h3>
+        <p class="sub" id="subpages-summary"></p>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Link</th><th>Verdict</th><th>HTTP / TLS</th><th>Reason</th></tr></thead>
+            <tbody id="subpages-body"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="block">
         <h3>Address breakdown</h3>
         <dl class="facts" id="anat-facts"></dl>
       </section>
 
       <p class="disclaimer" id="disclaimer"></p>
+      </div>
     </div>
   </section>
 
@@ -194,7 +225,7 @@
   <section id="v-how" role="tabpanel" aria-labelledby="t-how" hidden>
     <div class="pagehead">
       <h1>How a link becomes a verdict</h1>
-      <p>PhishGuard only sees the address (and, if you ask, the page's visible structure). It never visits a link unless you tick the option, and it never runs a page's scripts.</p>
+      <p>PhishGuard checks DNS and makes a small HTTP(S) reachability request for the submitted host. It extracts a short description from a reachable response, and checks subpages only when the parent passes legitimacy evidence and the hybrid detector reports Likely safe. The optional sandbox adds more page signals. It never runs a page's scripts.</p>
     </div>
 
     <section class="block">

@@ -92,6 +92,14 @@ function renderResult(d) {
   const box = $("results");
   box.hidden = false;
 
+  renderDomainCheck(d.domain_check || null);
+  renderSiteDescription(d.site_description);
+  if (d.prediction_skipped) {
+    $("prediction-content").hidden = true;
+    return;
+  }
+  $("prediction-content").hidden = false;
+
   $("verdict").dataset.tone = TONE[d.verdict_badge] || "safe";
   $("v-title").textContent = d.unified_verdict;
   $("v-statement").textContent = d.summary_statement;
@@ -106,10 +114,77 @@ function renderResult(d) {
   renderDetectors(d.models_comparison);
   renderDrivers(d.models_comparison.machine_learning);
   renderPage(d.optional_page_analysis);
+  renderSubpages(d.subpage_verification);
   renderFacts(d.breakdown.anatomy);
   $("disclaimer").textContent = d.disclaimer;
 
   box.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+}
+
+function renderDomainCheck(check) {
+  const msg = $("domain-check-message");
+  const facts = clear($("domain-check-facts"));
+  const suggestions = clear($("suggestions-list"));
+  const wrap = $("suggestions-wrap");
+  const suggestionsMessage = $("suggestions-message");
+  if (!check) {
+    msg.textContent = "DNS verification was not available for this result.";
+    wrap.hidden = true;
+    suggestionsMessage.textContent = "";
+    return;
+  }
+  msg.textContent = check.message || "Domain verification finished.";
+  const dns = check.dns;
+  const http = check.http;
+  const legitimacy = check.legitimacy;
+  const rows = [
+    ["Registered domain", check.registered_domain || check.hostname || "Unknown"],
+    ["DNS", dns ? (dns.resolves ? "Resolves" : (dns.blocked ? "Blocked by safety policy" : "Does not resolve")) : "Not checked"],
+    ["HTTP", http ? (http.reachable ? `Reachable (HTTP ${http.status_code})` : (http.error || "Unreachable")) : "Not checked"],
+    ["TLS", http ? (http.tls_valid ? "Certificate validated" : "Not validated") : "Not checked"],
+    ["Legitimacy evidence", legitimacy ? `${legitimacy.confidence} confidence${legitimacy.verified_genuine ? " — verified evidence checks passed" : " — not verified"}` : "Not available"],
+  ];
+  rows.forEach(([key, value]) => facts.append(el("dt", { text: key }), el("dd", { text: value })));
+  (check.suggestions || []).forEach((item) => {
+    if (!item.verified_genuine || !/^https?:\/\//i.test(item.url || "")) return;
+    const link = el("a", { text: `Did you mean ${item.domain}? (${item.confidence} confidence; Tranco #${item.rank})` });
+    link.href = item.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    const li = el("li", null, link, el("p", { class: "sub", text: item.reason + " " + item.note }));
+    suggestions.append(li);
+  });
+  wrap.hidden = !suggestions.childElementCount;
+  suggestionsMessage.textContent = suggestions.childElementCount ? "" : (check.suggestions_message || "");
+}
+
+function renderSiteDescription(site) {
+  $("site-category").textContent = site ? `Category: ${site.category || "Unknown"}` : "Category: Unknown";
+  $("site-description").textContent = site?.description || "No page description is available.";
+}
+
+function renderSubpages(result) {
+  const body = clear($("subpages-body"));
+  $("subpages-summary").textContent = result?.message || "Subpage verification is unavailable.";
+  (result?.links || []).forEach((item) => {
+    const linkCell = el("td");
+    if (/^https?:\/\//i.test(item.url || "")) {
+      const link = el("a", { text: item.url });
+      link.href = item.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      linkCell.append(link);
+    } else {
+      linkCell.textContent = item.url || "(unknown)";
+    }
+    const status = item.http_status == null ? "—" : `HTTP ${item.http_status}`;
+    const tls = item.tls_valid == null ? "TLS not checked" : (item.tls_valid ? "TLS valid" : "TLS invalid / unavailable");
+    const row = el("tr", null, linkCell,
+      el("td", { text: item.verdict || "Unknown" }),
+      el("td", { text: `${status}; ${tls}` }),
+      el("td", { text: item.reason || "" }));
+    body.append(row);
+  });
 }
 
 function seg(text, cls, label) {
