@@ -50,3 +50,4 @@ Desktop.ini
 
 # Downloaded feeds (large, re-creatable)
 data/cache/
+data/tranco.csv
