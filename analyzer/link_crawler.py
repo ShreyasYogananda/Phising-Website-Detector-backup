@@ -138,7 +138,7 @@ def _inspect_subpage(url: str, parent_domain: str, parent_genuine: bool) -> dict
     final_host = (urlparse(final_url).hostname or "").lower()
     same_domain = registered_domain(final_host) == parent_domain
     try:
-        prediction = RiskExplainer.analyze_url(url)
+        prediction = RiskExplainer.analyze_url(final_url)
         ml_verdict = prediction["unified_verdict"]
         risk_score = prediction["hybrid_risk_score"]
     except Exception:
@@ -156,6 +156,9 @@ def _inspect_subpage(url: str, parent_domain: str, parent_genuine: bool) -> dict
     elif status is None or status >= 400:
         verdict = "Suspicious"
         reasons.append(f"The server returned HTTP {status}.")
+    elif not fetched.get("body") or "html" not in fetched.get("content_type", "").lower():
+        verdict = "Suspicious"
+        reasons.append("No HTML was available to inspect for page-level risks.")
     elif any(flag["severity"] == "high" for flag in flags):
         verdict = "Phishing"
         reasons.extend(flag["detail"] for flag in flags)
@@ -221,8 +224,13 @@ def inspect_subpages(parent_url: str, parent_registered_domain: str | None,
             external.setdefault(absolute, text)
     selected_internal = sorted(internal.items(), key=lambda pair: _priority(pair[0], pair[1]))[:MAX_LINKS]
     results = []
+    policies = {origin: robots}
     for url, _text in selected_internal:
-        if robots and not robots.can_fetch(USER_AGENT, url):
+        link_origin = urljoin(url, "/")
+        if link_origin not in policies:
+            policies[link_origin] = _robots_policy(link_origin)
+        robots = policies[link_origin]
+        if robots is False or (robots and not robots.can_fetch(USER_AGENT, url)):
             results.append({"url": url, "final_url": None, "same_registered_domain": True,
                             "https": url.startswith("https://"), "tls_valid": False, "http_status": None,
                             "reachable": False, "verdict": "Unreachable", "reason": "robots.txt disallows automated inspection.",

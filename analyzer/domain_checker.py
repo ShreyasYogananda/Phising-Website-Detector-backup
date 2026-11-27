@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import csv
+from itertools import chain
 import ipaddress
 import os
 import re
@@ -32,7 +33,7 @@ REQUEST_TIMEOUT = (2.5, 4.0)
 USER_AGENT = "PhishGuardResearch/3.0 (+safe link verification; no scripts)"
 COMMON_SUFFIXES = ("com", "org", "net", "in", "co", "io", "edu", "gov", "co.in", "ac.in")
 TRUSTED_AGE_DAYS = 90
-_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=())
+_EXTRACTOR = tldextract.TLDExtract(suffix_list_urls=(), include_psl_private_domains=True)
 _TRANC0_CACHE: tuple[str, dict[str, int]] | None = None
 _TRANC0_STEMS: dict[str, list[str]] | None = None
 _TRANC0_STEMS_KEY: tuple[str, ...] | None = None
@@ -129,6 +130,17 @@ def resolve_host(hostname: str) -> dict[str, Any]:
             "addresses": sorted(addresses), "error": None}
 
 
+class _PinnedTLSAdapter(requests.adapters.HTTPAdapter):
+    """Connect to the approved IP while checking the certificate for the DNS name."""
+    def __init__(self, hostname):
+        self.hostname = hostname
+        super().__init__()
+
+    def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
+        super().init_poolmanager(connections, maxsize, block,
+                                 assert_hostname=self.hostname, server_hostname=self.hostname, **kwargs)
+
+
 def _checked_request(url: str, max_redirects: int = MAX_REDIRECTS,
                     max_bytes: int = MAX_BODY_BYTES) -> dict[str, Any]:
     """Fetch a small HTTP response, validating scheme, DNS and every redirect."""
@@ -140,7 +152,8 @@ def _checked_request(url: str, max_redirects: int = MAX_REDIRECTS,
         for hop in range(max_redirects + 1):
             parsed = urlparse(current)
             host = (parsed.hostname or "").lower()
-            if parsed.scheme not in {"http", "https"} or not host or is_ssrf_risk(host):
+            if (parsed.scheme not in {"http", "https"} or not host or is_ssrf_risk(host)
+                    or parsed.username is not None or parsed.port not in (None, 80, 443)):
                 return {"reachable": False, "blocked": True, "error": "Unsafe URL or redirect was blocked.",
                         "url": current, "redirects": hop, "tls_valid": False, "status_code": None,
                         "content_type": "", "body": ""}
@@ -151,7 +164,17 @@ def _checked_request(url: str, max_redirects: int = MAX_REDIRECTS,
                         "redirects": hop, "tls_valid": False, "status_code": None,
                         "content_type": "", "body": ""}
             try:
-                response = session.get(current, headers=headers, timeout=REQUEST_TIMEOUT,
+                addresses = dns_result["addresses"]
+                if not addresses:
+                    raise requests.ConnectionError("No public address available")
+                address = addresses[0]
+                authority = f"[{address}]" if ":" in address else address
+                if parsed.port:
+                    authority += f":{parsed.port}"
+                pinned = parsed._replace(netloc=authority).geturl()
+                if parsed.scheme == "https":
+                    session.mount("https://", _PinnedTLSAdapter(host))
+                response = session.get(pinned, headers={**headers, "Host": parsed.netloc}, timeout=REQUEST_TIMEOUT,
                                        allow_redirects=False, stream=True, verify=True)
             except requests.exceptions.SSLError as exc:
                 return {"reachable": False, "blocked": False, "error": "TLS certificate validation failed.",
@@ -220,15 +243,23 @@ def load_tranco_ranks() -> dict[str, int]:
         if path.exists():
             try:
                 with path.open("r", encoding="utf-8-sig", newline="") as handle:
-                    for row in csv.reader(handle):
+                    reader = csv.reader(handle)
+                    header = next(reader, [])
+                    project_csv = {"hostname", "label", "source", "tranco_rank"}.issubset(header)
+                    for row in reader if project_csv else chain([header], reader):
+                        if project_csv:
+                            fields = dict(zip(header, row))
+                            if fields.get("label") != "0" or fields.get("source", "").lower() != "tranco":
+                                continue
+                            row = [fields.get("tranco_rank", ""), fields.get("hostname", "")]
                         if len(row) < 2:
                             continue
                         try:
-                            rank = int(row[0].strip())
+                            rank = int(row[0].strip().removesuffix(".0"))
                         except ValueError:
                             continue
                         domain = row[1].strip().lower().rstrip(".")
-                        if domain:
+                        if domain and rank > 0:
                             ranks[domain] = rank
             except OSError:
                 ranks = {}
@@ -265,7 +296,8 @@ def _evidence(domain: str, http: dict[str, Any]) -> dict[str, Any]:
     final_registered = (f"{final_ext.domain}.{final_ext.suffix}"
                         if final_ext and final_ext.domain and final_ext.suffix else None)
     same_registered_domain = final_registered == domain
-    tls_ok = bool(http.get("reachable") and http.get("tls_valid") and same_registered_domain)
+    tls_ok = bool(http.get("reachable") and http.get("tls_valid") and same_registered_domain
+                  and 200 <= (http.get("status_code") or 0) < 300)
     age = domain_age_days(domain) if rank is not None and tls_ok else None
     rank_ok = rank is not None
     age_ok = age is None or age >= TRUSTED_AGE_DAYS
