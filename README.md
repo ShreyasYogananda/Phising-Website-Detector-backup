@@ -10,7 +10,7 @@ Paste a web address and PhishGuard tells you whether it looks like phishing, **w
 - **Optional live-page inspection** in an SSRF-hardened sandbox (see Security).
 - **Domain existence before prediction.** DNS A/AAAA/CNAME/NS lookup runs first, followed by a bounded HTTPS/HTTP reachability check. Names that do not resolve are reported as unresolved and are not sent to the phishing model.
 - **Evidence-ranked alternatives.** For unresolved names and likely typos, the app tries common suffix and look-alike candidates. A suggestion is shown as verified only when it resolves, serves HTTPS with a valid certificate, appears in the configured local Tranco list, and has no too-recent WHOIS age when WHOIS returns one. These signals are evidence, not proof.
-- **Subpage verification.** When the parent passes the evidence checks and the existing detector says Likely safe, the app checks up to 30 depth-one internal links, prioritizes account/payment/help pages, honors robots.txt, and labels external services (including payment gateways) as Third-party.
+- **Subpage verification.** For reachable parents, the app checks up to 30 depth-one internal links, prioritizes account/payment/help pages, honors robots.txt, and labels external services (including payment gateways) as Third-party.
 - **Extractive page description.** A category and short page-derived summary use metadata, headings, and visible text. Unreachable pages are described as unavailable; no LLM key is needed.
 
 ## Results (held-out test, 996 links)
@@ -85,8 +85,7 @@ is an additional signal when the optional WHOIS lookup returns a creation date.
 
 Every submitted hostname is checked for DNS and basic reachability. Enable the
 separate page-sandbox checkbox for the existing additional page inspection.
-The submitted page (including its path and query) supplies the description. The report prioritizes sentences explaining what the service offers or lets visitors do. The depth-one subpage crawl runs only when the parent has passed the
-legitimacy evidence checks and the hybrid detector reports Likely safe.
+The submitted page (including its path and query) supplies the description. The report prioritizes sentences explaining what the service offers or lets visitors do. Reachable parents get depth-one subpage discovery.
 
 Illustrative response for a missing domain (a candidate appears only if every
 verification check passes; the rank below is a placeholder for your local list):
@@ -99,17 +98,23 @@ Reason: Tranco rank, validated HTTPS certificate, and WHOIS age when available.
 
 ### Request flow
 
+The parent receives 3 points for valid same-domain TLS, 1 for HTTP 2xx, 3 for Tranco membership, 2 for registration age of at least 90 days, 2 for an institutional suffix and 2 for a Likely safe hybrid result. Legitimate requires 7 points, validated TLS, a successful response, Likely safe and no hard negative. IP hosts, invalid certificates, cross-domain redirects, young domains and High risk veto verification. Missing rank or age adds zero. These weights are heuristic.
+
+Reachable unverified parents still get discovery. A direct same-domain HTTPS subpage can inherit legitimacy with medium warnings. High flags and High risk prevent inheritance. Sparse menus trigger bounded sitemap and common-path discovery. Explicit robots exclusions apply even when the parent is verified.
+
+Download a real ranking from [Tranco](https://tranco-list.eu/) and configure the local file path above. The file data/tranco.sample.csv illustrates the format with fictional ranks.
+
 ```mermaid
 flowchart TD
-  A[URL or domain input] --> B[Sanitize and parse with public suffix rules]
-  B --> C{DNS resolves?}
-  C -- No --> D[Skip ML; check verified alternatives]
-  C -- Yes --> E[Bounded HTTPS/HTTP reachability and TLS]
-  E --> F[Existing URL features + rules + ML hybrid]
-  F --> G[Extract page description]
-  F --> H{Parent has legitimacy evidence and low-risk verdict?}
-  H -- No --> I[Do not claim subpages genuine]
-  H -- Yes --> J[Robots-aware depth-one subpage verification]
+  A[Input] --> B{DNS resolves?}
+  B -- No --> C[Skip inference and check alternatives]
+  B -- Yes --> D[HTTP and TLS checks]
+  D --> E[Hybrid detector and weighted parent evidence]
+  E --> F[Parent status and reasons]
+  D --> G[Discover links on reachable pages]
+  G --> H[Per-page evidence and warnings]
+  F --> H
+  G --> I[Description from page and About text]
 ```
 
 Other commands:

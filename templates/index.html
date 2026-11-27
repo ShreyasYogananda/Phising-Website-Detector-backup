@@ -32,7 +32,7 @@
   <section id="v-check" role="tabpanel" aria-labelledby="t-check">
     <div class="hero">
       <h1>Check a link before you click it.</h1>
-      <p class="lede">Paste a web address. PhishGuard first checks whether its domain resolves and makes a bounded reachability request, then explains the address and warning signs. It extracts a short description from a reachable page; detailed subpage checks run only when the parent passes the legitimacy evidence checks.</p>
+      <p class="lede">Paste a web address. PhishGuard first checks whether its domain resolves and makes a bounded reachability request, then explains the address and warning signs. It extracts a short description from a reachable page; discovered subpages show their own checks and whether they inherit trust from the parent.</p>
 
       <form id="check-form" class="check-form" novalidate>
         <label for="url-input" class="sr-only">Web address to check</label>
@@ -72,6 +72,7 @@
         <h3>Does this domain exist?</h3>
         <p id="domain-check-message" class="sub"></p>
         <dl class="facts" id="domain-check-facts"></dl>
+        <details><summary>Why this verdict?</summary><ul id="parent-signals"></ul></details>
         <div id="suggestions-wrap" hidden>
           <h4>Verified alternatives</h4>
           <ul id="suggestions-list"></ul>
@@ -83,7 +84,7 @@
       <section class="block" id="description-block">
         <h3>What this website does</h3>
         <p class="sub" id="site-category"></p>
-        <p id="site-description"></p>
+        <p id="site-description"></p><ul id="site-points"></ul>
       </section>
 
       <div id="prediction-content">
@@ -225,7 +226,7 @@
   <section id="v-how" role="tabpanel" aria-labelledby="t-how" hidden>
     <div class="pagehead">
       <h1>How a link becomes a verdict</h1>
-      <p>PhishGuard checks DNS and makes a small HTTP(S) reachability request for the submitted host. It extracts a short description from a reachable response, and checks subpages only when the parent passes legitimacy evidence and the hybrid detector reports Likely safe. The optional sandbox adds more page signals. It never runs a page's scripts.</p>
+      <p>PhishGuard checks DNS and makes a small HTTP(S) reachability request for the submitted host. It extracts a short description from a reachable response, and lists discovered subpages even when the parent is unverified. The optional sandbox adds more page signals. It never runs a page's scripts.</p>
     </div>
 
     <section class="block">

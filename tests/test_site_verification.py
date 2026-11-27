@@ -93,7 +93,7 @@ class TestSubpageVerification(unittest.TestCase):
 
     def test_external_payment_gateway_is_third_party(self):
         homepage = '<a href="https://checkout.stripe.com/pay/abc">Checkout</a>'
-        with mock.patch("analyzer.link_crawler._robots_policy", return_value=None):
+        with mock.patch("analyzer.link_crawler._robots_policy", return_value=None), mock.patch("analyzer.link_crawler._checked_request", return_value={}):
             result = inspect_subpages("https://shop.example.com/", "example.com", True, homepage)
         self.assertEqual(result["links"][0]["verdict"], "Third-party")
         self.assertFalse(result["links"][0]["same_registered_domain"])
@@ -108,10 +108,15 @@ class TestSubpageVerification(unittest.TestCase):
         self.assertEqual(result["links"][0]["verdict"], "Unreachable")
 
     def test_parent_failure_prevents_genuine_subpage_claims(self):
-        result = inspect_subpages("https://shop.example.com/", "example.com", False,
-                                  '<a href="/login">Login</a>')
-        self.assertFalse(result["enabled"])
-        self.assertEqual(result["total_count"], 0)
+        with mock.patch("analyzer.link_crawler._robots_policy", return_value=None), mock.patch(
+            "analyzer.link_crawler._checked_request", return_value=self.safe_page
+        ), mock.patch("analyzer.link_crawler.RiskExplainer.analyze_url", return_value={
+            "unified_verdict": "Likely safe", "hybrid_risk_score": 10
+        }):
+            result = inspect_subpages("https://shop.example.com/", "example.com", False,
+                                      '<a href="/login">Login</a>')
+        self.assertTrue(result["enabled"])
+        self.assertEqual(result["links"][0]["verdict"], "Unverified")
 
 
 if __name__ == "__main__":
@@ -139,3 +144,42 @@ def test_project_csv_uses_only_ranked_tranco_rows(tmp_path, monkeypatch):
 def test_visible_description_without_paragraph_tags():
     result = describe_site("<main><div>Search and compare library collections.</div></main>", None)
     assert result["description"] == "Search and compare library collections."
+
+def test_institutional_parent_and_sparse_menu(monkeypatch):
+    from analyzer import link_crawler as crawler
+    root = "https://college.ac.in"
+    http = dict(TLS_PAGE, url=root)
+    monkeypatch.setattr(domain_checker, "load_tranco_ranks", lambda: {})
+    evidence = domain_checker._evidence("college.ac.in", http, "Likely safe", age=None)
+    assert evidence["verified_genuine"]
+    assert not domain_checker._evidence("college.ac.in", http, "High risk")["verified_genuine"]
+    assert not domain_checker._evidence("college.ac.in", http, "Likely safe", age=30)["verified_genuine"]
+    seen = []
+    def fetch(url, **kwargs):
+        seen.append(url)
+        if url.endswith("/robots.txt"):
+            return {"reachable": False, "error": "timeout"}
+        if url.endswith("/sitemap.xml"):
+            return dict(http, url=url, body="<urlset><url><loc>" + root + "/courses</loc></url></urlset>")
+        if url.endswith("/courses"):
+            return dict(http, url=url, body='<iframe hidden></iframe>')
+        return dict(http, url=url, status_code=404, body="")
+    monkeypatch.setattr(crawler, "_checked_request", fetch)
+    monkeypatch.setattr(crawler.time, "sleep", lambda delay: None)
+    monkeypatch.setattr(crawler.RiskExplainer, "analyze_url", lambda url: {"unified_verdict":"Suspicious","hybrid_risk_score":50})
+    result = inspect_subpages(root, "college.ac.in", True, "<script>menu()</script>")
+    assert root + "/admissions" in seen and root + "/sitemap.xml" in seen
+    assert "Few links found" in result["message"]
+    assert result["links"][0]["verdict"] == "Genuine"
+    assert "Warning" in result["links"][0]["reason"]
+
+
+def test_description_with_sufficient_evidence():
+    html = "<title>Engineering College</title><nav><a>Admissions</a><a>Academics</a></nav>"
+    for subject in ["Civil engineering", "Computer science", "Mechanical engineering",
+                    "Electrical engineering", "Chemical engineering", "Industrial engineering"]:
+        html += f"<p>{subject} students learn through supervised laboratory projects and practical workshops offered throughout the academic year on campus.</p>"
+    result = describe_site(html, None)
+    assert 100 <= len(result["description"].split()) <= 150
+    assert 3 <= len(result["key_points"]) <= 5
+    assert "Admissions" in result["description"]

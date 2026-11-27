@@ -122,6 +122,10 @@ function renderResult(d) {
 }
 
 function renderDomainCheck(check) {
+  const signals = clear($("parent-signals"));
+  for (const reason of check?.legitimacy?.reasons || [check?.message || "Evidence unavailable"]) {
+    signals.append(el("li", {text: reason}));
+  }
   const msg = $("domain-check-message");
   const facts = clear($("domain-check-facts"));
   const suggestions = clear($("suggestions-list"));
@@ -138,6 +142,7 @@ function renderDomainCheck(check) {
   const http = check.http;
   const legitimacy = check.legitimacy;
   const rows = [
+    ["Parent status", check.parent_status || "Unverified"],
     ["Registered domain", check.registered_domain || check.hostname || "Unknown"],
     ["DNS", dns ? (dns.resolves ? "Resolves" : (dns.blocked ? "Blocked by safety policy" : "Does not resolve")) : "Not checked"],
     ["HTTP", http ? (http.reachable ? `Reachable (HTTP ${http.status_code})` : (http.error || "Unreachable")) : "Not checked"],
@@ -159,6 +164,9 @@ function renderDomainCheck(check) {
 }
 
 function renderSiteDescription(site) {
+  const points = clear($("site-points"));
+  for (const fact of site?.key_points || []) points.append(el("li", {text: fact}));
+  if (site?.limited_evidence) points.append(el("li", {text: "Limited descriptive text was available."}));
   $("site-category").textContent = site ? `Category: ${site.category || "Unknown"}` : "Category: Unknown";
   $("site-description").textContent = site?.description || "No page description is available.";
 }
@@ -166,6 +174,11 @@ function renderSiteDescription(site) {
 function renderSubpages(result) {
   const body = clear($("subpages-body"));
   $("subpages-summary").textContent = result?.message || "Subpage verification is unavailable.";
+  if (!result?.links?.length) {
+    body.append(el("tr", null, ...["N/A — no discovered link", "Unverified", "N/A — no response",
+      "N/A — no destination", "N/A — no link to score", result?.message || "Discovery unavailable."]
+      .map(text => el("td", {text}))));
+  }
   (result?.links || []).forEach((item) => {
     const linkCell = el("td");
     if (/^https?:\/\//i.test(item.url || "")) {
@@ -177,14 +190,14 @@ function renderSubpages(result) {
     } else {
       linkCell.textContent = item.url || "(unknown)";
     }
-    const status = item.http_status == null ? "—" : `HTTP ${item.http_status}`;
-    const tls = item.tls_valid == null ? "TLS not checked" : (item.tls_valid ? "TLS valid" : "TLS invalid / unavailable");
+    const status = item.http_status == null ? "N/A — no status" : `HTTP ${item.http_status}`;
+    const tls = item.tls_valid == null ? "TLS N/A — not checked" : (item.tls_valid ? "TLS valid" : "TLS invalid / unavailable");
     const row = el("tr", null, linkCell,
-      el("td", { text: item.verdict || "Unknown" }),
+      el("td", { text: item.verdict === "Genuine" ? "Genuine (inherited from verified parent)" : item.verdict || "Unverified" }),
       el("td", { text: `${status}; ${tls}` }),
-      el("td", { text: item.same_registered_domain ? "Same domain" : "External" }),
-      el("td", { text: item.ml_verdict ? [item.ml_verdict, item.risk_score].filter(v => v != null).join(" · ") : "Not scored" }),
-      el("td", { text: item.reason || "" }));
+      el("td", { text: `${item.domain || "N/A — no registered domain"} (same as parent: ${item.same_registered_domain ? "yes" : "no"})` }),
+      el("td", { text: item.ml_verdict ? [item.ml_verdict, item.risk_score].filter(v => v != null).join(" · ") : "N/A — page not scored" }),
+      el("td", { text: item.reason || "N/A — no evidence" }));
     body.append(row);
   });
 }
