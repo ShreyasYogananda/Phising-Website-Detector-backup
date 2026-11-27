@@ -182,6 +182,8 @@ function renderSubpages(result) {
     const row = el("tr", null, linkCell,
       el("td", { text: item.verdict || "Unknown" }),
       el("td", { text: `${status}; ${tls}` }),
+      el("td", { text: item.same_registered_domain ? "Same domain" : "External" }),
+      el("td", { text: item.ml_verdict ? [item.ml_verdict, item.risk_score].filter(v => v != null).join(" · ") : "Not scored" }),
       el("td", { text: item.reason || "" }));
     body.append(row);
   });

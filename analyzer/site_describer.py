@@ -62,7 +62,7 @@ def describe_site(html: str | None, final_url: str | None, reachable: bool = Tru
     boilerplate = re.compile(r"accept (all )?cookies|cookie preferences|enable javascript|"
                              r"verify you are human|all rights reserved", re.I)
     candidates = []
-    for passage in [description, *paragraphs, *headings, title]:
+    for passage in [description, *paragraphs, *headings, title, main.get_text(" ", strip=True)[:700]]:
         for sentence in re.split(r"(?<=[.!?])\s+", _clean(passage)):
             if len(sentence.split()) < 4 or boilerplate.search(sentence):
                 continue

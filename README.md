@@ -73,7 +73,13 @@ python run.py                      # open http://127.0.0.1:8000
 
 This repository does not include the Tranco CSV. Put a Tranco export with
 `rank,domain` columns at `data/tranco.csv`, or point `TRANCO_CSV_PATH` at the
-file. The app does not download a list automatically. Without a matching local
+file. You can also point it directly at the project raw.csv. Only legitimate Tranco rows with a positive rank supply popularity evidence. In Windows PowerShell, run this before starting the app:
+
+```powershell
+$env:TRANCO_CSV_PATH = Join-Path $env:USERPROFILE "Downloads/ds/raw.csv"
+```
+
+The app does not download a list automatically. Without a matching local
 Tranco rank, it will not label an alternative as verified genuine. WHOIS age
 is an additional signal when the optional WHOIS lookup returns a creation date.
 

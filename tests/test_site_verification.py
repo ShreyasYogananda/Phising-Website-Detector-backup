@@ -124,3 +124,18 @@ def test_description_explains_service_from_submitted_page():
             '<main><p>This library helps students find and borrow textbooks.</p></main>')
     assert describe_site(page, parsed["normalized_url"])["description"] == (
         "This library helps students find and borrow textbooks.")
+
+
+def test_project_csv_uses_only_ranked_tranco_rows(tmp_path, monkeypatch):
+    path = tmp_path / "raw.csv"
+    path.write_text("hostname,label,source,tranco_rank\n"
+                    "one.example,0,tranco,123.0\n"
+                    "two.example,1,phishtank,12\n"
+                    "three.example,0,tranco,\n")
+    monkeypatch.setenv("TRANCO_CSV_PATH", str(path))
+    assert domain_checker.load_tranco_ranks() == {"one.example": 123}
+
+
+def test_visible_description_without_paragraph_tags():
+    result = describe_site("<main><div>Search and compare library collections.</div></main>", None)
+    assert result["description"] == "Search and compare library collections."
