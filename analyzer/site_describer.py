@@ -21,12 +21,15 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-def describe_site(html: str | None, final_url: str | None, reachable: bool = True) -> dict:
+def describe_site(html: str | None, final_url: str | None, reachable: bool = True, about_text: str = "") -> dict:
     """Build a 2–3 sentence extractive summary; never invent unreachable content."""
     if not reachable:
         return {"available": False, "category": "Unknown",
                 "description": "The website is unreachable, so no description is available."}
     soup = BeautifulSoup((html or "")[:512 * 1024], "html.parser")
+    sections = list(dict.fromkeys(_clean(a.get_text(" ", strip=True)) for a in
+                                 soup.select('nav a, [role="navigation"] a, .menu a')))
+    sections = [name for name in sections if 0 < len(name) <= 45][:6]
     for node in soup(["script", "style", "noscript", "svg", "iframe", "nav", "footer", "aside", "form"]):
         node.decompose()
     for node in soup.find_all(attrs={"hidden": True}):
@@ -43,7 +46,7 @@ def describe_site(html: str | None, final_url: str | None, reachable: bool = Tru
             description = _clean(meta["content"])
             if description:
                 break
-    headings = [_clean(h.get_text(" ", strip=True)) for h in soup.find_all(["h1", "h2"], limit=5)]
+    headings = [_clean(h.get_text(" ", strip=True)) for h in soup.find_all(["h1", "h2", "h3"], limit=5)]
     headings = [h for h in headings if h]
     visible = _clean(soup.get_text(" ", strip=True))[:700]
     evidence = " ".join([final_url or "", title, description, " ".join(headings), visible]).lower()
@@ -62,9 +65,10 @@ def describe_site(html: str | None, final_url: str | None, reachable: bool = Tru
     boilerplate = re.compile(r"accept (all )?cookies|cookie preferences|enable javascript|"
                              r"verify you are human|all rights reserved", re.I)
     candidates = []
-    for passage in [description, *paragraphs, *headings, title, main.get_text(" ", strip=True)[:700]]:
+    for passage in [description, *paragraphs, about_text, *headings, title,
+                    "" if paragraphs else main.get_text(" ", strip=True)[:700]]:
         for sentence in re.split(r"(?<=[.!?])\s+", _clean(passage)):
-            if len(sentence.split()) < 4 or boilerplate.search(sentence):
+            if len(sentence.split()) < 4 or boilerplate.search(sentence) or sentence.lower().startswith("welcome to") or len(sentence.split()) > 55:
                 continue
             candidates.append((bool(purpose.search(sentence)), sentence))
     if not candidates:
@@ -72,10 +76,18 @@ def describe_site(html: str | None, final_url: str | None, reachable: bool = Tru
                 "description": "The page has too little descriptive text to explain what this website does."}
     candidates.sort(key=lambda item: item[0], reverse=True)
     sentences = list(dict.fromkeys(sentence for _, sentence in candidates))
-    summary = sentences[0]
-    if len(sentences) > 1 and candidates[0][0] and purpose.search(sentences[1]) and len(summary + sentences[1]) < 300:
-        summary = summary.rstrip(".") + ". " + sentences[1]
-    if len(summary) > 320:
-        summary = summary[:317].rsplit(" ", 1)[0] + "..."
-    return {"available": True, "category": category, "description": summary,
-            "source": "Website metadata and visible page text"}
+    selected = []
+    budget = 142 - (len(" ".join(sections).split()) if sections else 0)
+    for sentence in sentences:
+        if len(selected) >= 7 or (selected and len(" ".join(selected).split()) >= 110):
+            break
+        if len(sentence.split()) <= budget:
+            selected.append(sentence.rstrip(".!?") + ".")
+            budget -= len(sentence.split())
+    if sections:
+        selected.append("Main sections include " + ", ".join(sections) + ".")
+    summary = " ".join(selected)
+    return {"available": bool(summary), "category": category, "description": summary,
+            "key_points": selected[:4] if len(selected) < 5 else [*selected[:3], selected[-1]],
+            "limited_evidence": len(summary.split()) < 100,
+            "source": "Page metadata, headings, visible paragraphs, navigation and available About text"}

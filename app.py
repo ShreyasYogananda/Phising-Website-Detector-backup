@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from analyzer.page_analyzer import inspect_live_page_isolated
-from analyzer.domain_checker import check_domain
+from analyzer.domain_checker import check_domain, _evidence
 from analyzer.link_crawler import inspect_subpages
 from analyzer.site_describer import describe_site
 from evaluation.evaluator import load_evaluation_results, run_evaluation
@@ -239,17 +239,24 @@ async def analyze_url_endpoint(req: AnalyzeRequest):
 
     try:
         result = RiskExplainer.analyze_url(url, page_analysis_result=page_result)
-        legitimacy = domain_result.get("legitimacy") or {}
-        parent_genuine = bool(legitimacy.get("verified_genuine") and
-                              result.get("unified_verdict") == "Likely safe")
         http = domain_result.get("http") or {}
+        domain = domain_result.get("registered_domain")
+        hybrid = result["unified_verdict"]
+        age = (domain_result.get("legitimacy") or {}).get("domain_age_days")
+        evidence = _evidence(domain or domain_result.get("hostname"), http, hybrid, age=age)
+        genuine = evidence["verified_genuine"] and hybrid == "Likely safe"
+        status = "Legitimate" if genuine else ("Suspicious" if evidence["hard_negative"] or
+                  hybrid == "Suspicious" or domain_result["status"] == "blocked" else "Unverified")
+        domain_result.update(legitimacy=evidence, parent_status=status)
+        result["parent_status"] = status
+        if http.get("reachable"):
+            subpages = await run_in_threadpool(inspect_subpages, parent_url, domain, genuine, fetched_html)
+        else:
+            subpages = {"enabled": False, "message": "Parent page unavailable.", "links": [], "total_count": 0}
         descriptive_html = fetched_html if (200 <= (http.get("status_code") or 0) < 300
                                              and "html" in http.get("content_type", "").lower()) else ""
-        description = describe_site(descriptive_html, parent_url,
-                                    reachable=bool((domain_result.get("http") or {}).get("reachable")))
-        subpages = await run_in_threadpool(
-            inspect_subpages, parent_url, domain_result.get("registered_domain"),
-            parent_genuine, fetched_html)
+        description = describe_site(descriptive_html, parent_url, reachable=bool(http.get("reachable")),
+                                    about_text=subpages.pop("about_text", ""))
         result["domain_check"] = domain_result
         result["prediction_skipped"] = False
         result["site_description"] = description

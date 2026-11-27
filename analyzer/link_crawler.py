@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import time
+from xml.etree import ElementTree as ET
 from urllib.parse import urldefrag, urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -36,20 +38,8 @@ def _priority(url: str, anchor: str) -> tuple[int, str]:
 def _robots_policy(origin: str) -> RobotFileParser | bool | None:
     """Read robots.txt safely; None means allowed by absence, False means fail closed."""
     robots_url = urljoin(origin, "/robots.txt")
-    fetched = _checked_request(robots_url, max_bytes=128 * 1024)
-    if not fetched.get("reachable"):
-        if fetched.get("status_code") in {404, 410}:
-            return None
-        return False
-    # A robots redirect to a different registered domain cannot authorize us to
-    # crawl the original site's links, so stop instead of guessing the policy.
-    origin_host = (urlparse(origin).hostname or "").lower()
-    final_host = (urlparse(fetched.get("url", "")).hostname or "").lower()
-    if registered_domain(origin_host) != registered_domain(final_host):
-        return False
-    if fetched.get("status_code", 200) >= 400:
-        return None if fetched.get("status_code") in {404, 410} else False
-    if not fetched.get("body"):
+    fetched = _checked_request(robots_url, max_redirects=0, max_bytes=128 * 1024)
+    if not fetched.get("reachable") or fetched.get("status_code") != 200 or not fetched.get("body"):
         return None
     parser = RobotFileParser()
     parser.set_url(robots_url)
@@ -128,13 +118,13 @@ def _inspect_subpage(url: str, parent_domain: str, parent_genuine: bool) -> dict
                 "https": parsed.scheme == "https", "tls_valid": False, "http_status": None,
                 "reachable": False, "verdict": "Unreachable", "reason": "A private or local destination was blocked.",
                 "red_flags": [], "ml_verdict": None, "risk_score": None}
-    fetched = _checked_request(url)
+    fetched = _checked_request(url, max_redirects=0)
     if not fetched.get("reachable"):
         return {"url": url, "final_url": fetched.get("url"), "same_registered_domain": True,
                 "https": parsed.scheme == "https", "tls_valid": False, "http_status": fetched.get("status_code"),
                 "reachable": False, "verdict": "Unreachable", "reason": fetched.get("error") or "The page could not be reached.",
                 "red_flags": [], "ml_verdict": None, "risk_score": None}
-    final_url = fetched["url"]
+    final_url = fetched.get("location") or fetched["url"]
     final_host = (urlparse(final_url).hostname or "").lower()
     same_domain = registered_domain(final_host) == parent_domain
     try:
@@ -156,6 +146,9 @@ def _inspect_subpage(url: str, parent_domain: str, parent_genuine: bool) -> dict
     elif status is None or status >= 400:
         verdict = "Suspicious"
         reasons.append(f"The server returned HTTP {status}.")
+    elif fetched.get("redirects"):
+        verdict = "Unverified"
+        reasons.append("Redirect response. Direct page content was unavailable.")
     elif not fetched.get("body") or "html" not in fetched.get("content_type", "").lower():
         verdict = "Suspicious"
         reasons.append("No HTML was available to inspect for page-level risks.")
@@ -165,32 +158,27 @@ def _inspect_subpage(url: str, parent_domain: str, parent_genuine: bool) -> dict
     elif ml_verdict == "High risk":
         verdict = "Phishing"
         reasons.append("The existing hybrid URL detector classified this subpage as high risk.")
-    elif flags or ml_verdict != "Likely safe":
-        verdict = "Suspicious"
-        reasons.extend(flag["detail"] for flag in flags)
-        if ml_verdict not in {"Likely safe", "Unavailable"}:
-            reasons.append(f"The existing hybrid URL detector said: {ml_verdict}.")
-        elif ml_verdict == "Unavailable":
-            reasons.append("The existing model result was unavailable.")
-    elif not parent_genuine:
-        verdict = "Suspicious"
-        reasons.append("The parent site has not passed the legitimacy evidence checks.")
+    elif not parent_genuine or fetched.get("redirects") or not 200 <= status < 300 or ml_verdict == "Unavailable":
+        verdict = "Unverified"
+        reasons.append("Inheritance requires a verified parent, direct 2xx response and available detector result.")
     else:
         verdict = "Genuine"
-        reasons.append("Same registered domain, successful HTTPS, no detected page red flags, and low model risk.")
+        reasons.append("Inherited from verified parent.")
+    reasons.extend(flag["detail"] for flag in flags)
+    if ml_verdict == "Suspicious":
+        reasons.append("Warning: hybrid detector rated this address Suspicious.")
     return {"url": url, "final_url": final_url, "same_registered_domain": same_domain,
             "https": parsed.scheme == "https", "tls_valid": bool(fetched.get("tls_valid")),
             "http_status": status, "reachable": True, "verdict": verdict,
             "reason": " ".join(dict.fromkeys(reasons)), "red_flags": flags,
-            "ml_verdict": ml_verdict, "risk_score": risk_score}
+            "ml_verdict": ml_verdict, "risk_score": risk_score,
+            "about_text": " ".join(p.get_text(" ", strip=True) for p in soup.select("p")[:8])[:2500]
+            if same_domain and status == 200 and "about" in parsed.path.lower() else ""}
 
 
 def inspect_subpages(parent_url: str, parent_registered_domain: str | None,
                      parent_genuine: bool, homepage_html: str | None = None) -> dict:
     """Crawl up to 30 depth-one links, honoring robots.txt and not following scripts."""
-    if not parent_registered_domain or not parent_genuine:
-        return {"enabled": False, "message": "Subpages are not marked genuine because the parent did not pass all legitimacy checks.",
-                "verified_count": 0, "flagged_count": 0, "total_count": 0, "links": []}
     origin = urljoin(parent_url, "/")
     if homepage_html is None:
         fetched = _checked_request(parent_url)
@@ -220,23 +208,70 @@ def inspect_subpages(parent_url: str, parent_registered_domain: str | None,
         registered = registered_domain(host)
         if registered == parent_registered_domain:
             internal.setdefault(absolute, text)
-        elif _is_payment_host(host) or any(term in f"{absolute} {text}".lower() for term in KEY_PAGES):
-            external.setdefault(absolute, text)
-    selected_internal = sorted(internal.items(), key=lambda pair: _priority(pair[0], pair[1]))[:MAX_LINKS]
-    results = []
-    policies = {origin: robots}
-    for url, _text in selected_internal:
-        link_origin = urljoin(url, "/")
-        if link_origin not in policies:
-            policies[link_origin] = _robots_policy(link_origin)
-        robots = policies[link_origin]
-        if robots is False or (robots and not robots.can_fetch(USER_AGENT, url)):
-            results.append({"url": url, "final_url": None, "same_registered_domain": True,
-                            "https": url.startswith("https://"), "tls_valid": False, "http_status": None,
-                            "reachable": False, "verdict": "Unreachable", "reason": "robots.txt disallows automated inspection.",
-                            "red_flags": [], "ml_verdict": None, "risk_score": None})
         else:
-            results.append(_inspect_subpage(url, parent_registered_domain, parent_genuine))
+            external.setdefault(absolute, text)
+    policies = {origin: robots}
+    def allowed(url):
+        try:
+            parsed = urlparse(url)
+            if (parsed.scheme not in {"https", "http"} or not parent_registered_domain or
+                    registered_domain(parsed.hostname) != parent_registered_domain or
+                    parsed.username is not None or parsed.port not in (None, 80, 443)):
+                return False
+            site = urljoin(url, "/")
+            if site not in policies:
+                policies[site] = _robots_policy(site)
+            policy = policies[site]
+            return policy is None or policy.can_fetch(USER_AGENT, url)
+        except ValueError:
+            return False
+
+    # Only homepage links are observations. Sitemap and conventional paths must
+    # respond successfully before being listed. Never follow their redirects.
+    candidates = list(sorted(internal, key=lambda u: _priority(u, internal[u])))
+    if len(internal) < 5 and parent_registered_domain:
+        maps = [urljoin(origin, "/sitemap.xml")]
+        for sitemap in maps:
+            if not allowed(sitemap):
+                continue
+            time.sleep(0.12)
+            response = _checked_request(sitemap, max_redirects=0, max_bytes=131072)
+            xml = response.get("body", "")
+            if response.get("status_code") != 200 or "<!DOCTYPE" in xml.upper():
+                continue
+            try:
+                root = ET.fromstring(xml)
+            except ET.ParseError:
+                continue
+            for loc in root.findall(".//{*}loc"):
+                target = (loc.text or "").strip()
+                if registered_domain(urlparse(target).hostname) != parent_registered_domain:
+                    continue
+                if root.tag.split("}")[-1] == "sitemapindex":
+                    if len(maps) < 3 and target not in maps:
+                        maps.append(target)
+                elif len(candidates) < MAX_LINKS and target not in candidates:
+                    candidates.append(target)
+        candidates.extend(urljoin(origin, "/" + path) for path in (
+            "login signin signup register account payment checkout contact about admissions "
+            "academics placements departments support").split())
+    results = []
+    about_text = ""
+    for url in list(dict.fromkeys(candidates))[:MAX_LINKS - min(len(external), 3)]:
+        if not allowed(url):
+            if url in internal:
+                results.append({"url": url, "verdict": "Unverified", "same_registered_domain": True,
+                                "reason": "Inspection disallowed by robots.txt or destination policy."})
+            continue
+        time.sleep(0.12)
+        row = _inspect_subpage(url, parent_registered_domain, parent_genuine)
+        if url not in internal and not 200 <= (row.get("http_status") or 0) < 400:
+            continue
+        text = row.pop("about_text", "")
+        about_text = about_text or text
+        if url not in internal and any(r.get("final_url") == row.get("final_url") for r in results):
+            continue
+        results.append(row)
     slots = max(0, MAX_LINKS - len(results))
     for url, text in sorted(external.items(), key=lambda pair: _priority(pair[0], pair[1]))[:slots]:
         results.append({"url": url, "final_url": None, "same_registered_domain": False,
@@ -244,10 +279,20 @@ def inspect_subpages(parent_url: str, parent_registered_domain: str | None,
                         "reachable": None, "verdict": "Third-party",
                         "reason": "External link (including payment gateways) is listed separately and is not assumed genuine.",
                         "red_flags": [], "ml_verdict": None, "risk_score": None})
+    about = urljoin(origin, "/about")
+    if not about_text and about not in candidates and allowed(about):
+        time.sleep(0.12)
+        response = _checked_request(about, max_redirects=0)
+        if response.get("status_code") == 200 and "html" in response.get("content_type", ""):
+            page = BeautifulSoup(response.get("body", ""), "html.parser")
+            about_text = " ".join(p.get_text(" ", strip=True) for p in page.select("p")[:8])[:2500]
+    for row in results:
+        row["domain"] = registered_domain(urlparse(row.get("final_url") or row["url"]).hostname)
     verified = sum(result["verdict"] == "Genuine" for result in results)
     flagged = len(results) - verified
     return {"enabled": True,
-            "message": f"{verified}/{len(results)} discovered links verified genuine; {flagged} flagged or external.",
+            "about_text": about_text,
+            "message": ("Few links found; the site may build its menu with JavaScript. " if len(results) < 5 else "") + f"{verified}/{len(results)} discovered links verified genuine; {flagged} flagged or external.",
             "verified_count": verified, "flagged_count": flagged, "total_count": len(results),
             "links": results}
 

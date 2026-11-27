@@ -145,6 +145,8 @@ def _checked_request(url: str, max_redirects: int = MAX_REDIRECTS,
                     max_bytes: int = MAX_BODY_BYTES) -> dict[str, Any]:
     """Fetch a small HTTP response, validating scheme, DNS and every redirect."""
     current = url
+    initial_site = _EXTRACTOR(urlparse(url).hostname or "").top_domain_under_public_suffix
+    left_domain = False
     session = requests.Session()
     session.trust_env = False
     headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"}
@@ -157,6 +159,7 @@ def _checked_request(url: str, max_redirects: int = MAX_REDIRECTS,
                 return {"reachable": False, "blocked": True, "error": "Unsafe URL or redirect was blocked.",
                         "url": current, "redirects": hop, "tls_valid": False, "status_code": None,
                         "content_type": "", "body": ""}
+            left_domain |= _EXTRACTOR(host).top_domain_under_public_suffix != initial_site
             dns_result = resolve_host(host)
             if not dns_result["resolves"]:
                 return {"reachable": False, "blocked": dns_result["blocked"],
@@ -183,6 +186,10 @@ def _checked_request(url: str, max_redirects: int = MAX_REDIRECTS,
             if response.is_redirect or response.is_permanent_redirect:
                 location = response.headers.get("Location")
                 response.close()
+                if max_redirects == 0 and location:
+                    return {"reachable": True, "url": current, "location": urljoin(current, location),
+                            "status_code": response.status_code, "redirects": 1, "tls_valid": parsed.scheme == "https",
+                            "content_type": "", "body": ""}
                 if not location or hop >= max_redirects:
                     return {"reachable": False, "blocked": False, "error": "Too many or malformed redirects.",
                             "url": current, "redirects": hop + 1, "tls_valid": parsed.scheme == "https",
@@ -191,7 +198,7 @@ def _checked_request(url: str, max_redirects: int = MAX_REDIRECTS,
                 continue
             content_type = response.headers.get("Content-Type", "")
             body = bytearray()
-            if content_type.lower().startswith("text/") or "application/xhtml" in content_type.lower() or not content_type:
+            if content_type.lower().startswith("text/") or "xml" in content_type.lower() or not content_type:
                 try:
                     for chunk in response.iter_content(chunk_size=16 * 1024):
                         if not chunk:
@@ -203,7 +210,7 @@ def _checked_request(url: str, max_redirects: int = MAX_REDIRECTS,
                     response.close()
             else:
                 response.close()
-            return {"reachable": True, "blocked": False, "error": None, "url": current,
+            return {"reachable": True, "left_domain": left_domain, "blocked": False, "error": None, "url": current,
                     "redirects": hop, "tls_valid": parsed.scheme == "https",
                     "status_code": response.status_code, "content_type": content_type,
                     "body": bytes(body).decode(response.encoding or "utf-8", errors="replace")}
@@ -289,35 +296,47 @@ def domain_age_days(domain: str) -> int | None:
     return max(0, (datetime.now(timezone.utc) - created.astimezone(timezone.utc)).days)
 
 
-def _evidence(domain: str, http: dict[str, Any]) -> dict[str, Any]:
+INSTITUTIONAL = (".ac.in", ".edu", ".edu.in", ".gov.in", ".gov", ".ac.uk", ".edu.au")
+
+
+def _evidence(domain, http, hybrid=None, *, age=None):
+    """Seven points indicate strong evidence. Unknown observations contribute zero."""
     rank = load_tranco_ranks().get(domain)
-    final_host = (urlparse(http.get("url", "")).hostname or "").lower()
-    final_ext = _EXTRACTOR(final_host) if final_host else None
-    final_registered = (f"{final_ext.domain}.{final_ext.suffix}"
-                        if final_ext and final_ext.domain and final_ext.suffix else None)
-    same_registered_domain = final_registered == domain
-    tls_ok = bool(http.get("reachable") and http.get("tls_valid") and same_registered_domain
-                  and 200 <= (http.get("status_code") or 0) < 300)
-    age = domain_age_days(domain) if rank is not None and tls_ok else None
-    rank_ok = rank is not None
-    age_ok = age is None or age >= TRUSTED_AGE_DAYS
-    verified = rank_ok and tls_ok and age_ok
-    reasons = []
-    if rank is not None:
-        reasons.append(f"Tranco rank #{rank} in the configured local list")
-    else:
-        reasons.append("No matching Tranco rank was found in the configured local list")
-    reasons.append("HTTPS certificate validated" if tls_ok else "HTTPS reachability or certificate validation failed")
-    if age is not None:
-        reasons.append(f"WHOIS registration age: {age} days")
-        if age < TRUSTED_AGE_DAYS:
-            reasons.append(f"Domain is newer than the {TRUSTED_AGE_DAYS}-day evidence threshold")
-    confidence = "high" if verified and rank is not None and rank <= 100_000 else (
-        "medium" if tls_ok and rank_ok else "low")
-    return {"verified_genuine": verified, "confidence": confidence, "tranco_rank": rank,
-            "domain_age_days": age, "same_registered_domain": same_registered_domain,
-            "reasons": reasons,
-            "note": "These signals are evidence of legitimacy, not proof that every page is safe."}
+    host = urlparse(http.get("url") or "").hostname or ""
+    ext = _EXTRACTOR(host)
+    same = bool(domain and ext.top_domain_under_public_suffix == domain)
+    status = http.get("status_code")
+    ok = 200 <= (status or 0) < 300
+    tls = http.get("tls_valid") and same
+    institutional = bool(domain and domain.endswith(INSTITUTIONAL))
+    try:
+        ipaddress.ip_address(host or domain)
+        literal = True
+    except ValueError:
+        literal = False
+    invalid_tls = http.get("exception") == "SSLError" or http.get("tls_failed")
+    veto = bool(literal or invalid_tls or (host and not same) or http.get("left_domain")
+                or hybrid == "High risk" or (age is not None and age < TRUSTED_AGE_DAYS))
+    signals = []
+    def add(label, observed, weight):
+        state = "unknown" if observed is None else ("pass" if observed else "fail")
+        signals.append({"label": label, "state": state, "points": weight if observed else 0})
+    add("Valid TLS on the submitted domain", False if invalid_tls else tls if status else None, 3)
+    add(f"HTTP response {status or 'unavailable'}", ok if status else None, 1)
+    add("Stayed on the same registered domain", same and not http.get("left_domain") if host else None, 0)
+    add("Domain hostname rather than IP", not literal, 0)
+    add(f"Tranco rank {rank or 'unavailable'}", True if rank else None, 3)
+    add(f"Registration age: {age} days" if age is not None else "Registration age unavailable",
+        age >= TRUSTED_AGE_DAYS if age is not None else None, 2)
+    add("Institutional suffix", institutional, 2)
+    add(f"Hybrid detector: {hybrid or 'unavailable'}", hybrid == "Likely safe" if hybrid else None, 2)
+    score = sum(signal["points"] for signal in signals)
+    verified = bool(score >= 7 and tls and ok and not veto)
+    return {"verified_genuine": verified, "confidence": "high" if verified else
+            "medium" if score >= 5 and not veto else "low", "score": score, "hard_negative": veto,
+            "tranco_rank": rank, "domain_age_days": age, "same_registered_domain": same,
+            "signals": signals, "reasons": [s["state"] + ": " + s["label"] for s in signals],
+            "note": "Confidence reflects observed evidence and does not guarantee ownership or safety."}
 
 
 def _candidate_names(hostname: str) -> list[str]:
@@ -401,7 +420,7 @@ def suggest_alternatives(hostname: str) -> list[dict[str, Any]]:
         if not dns_result["resolves"] or dns_result["blocked"]:
             continue
         http = _checked_request(f"https://{candidate}/")
-        evidence = _evidence(registered, http)
+        evidence = _evidence(registered, http, age=domain_age_days(registered) if http.get("tls_valid") else None)
         if not (http.get("reachable") and http.get("tls_valid") and evidence["verified_genuine"]):
             continue
         seen_domains.add(registered)
@@ -458,8 +477,9 @@ def check_domain(value: str) -> dict[str, Any]:
             and value.strip().rstrip("/").lower() == host):
         http_fallback = _checked_request(f"http://{host}/")
         if http_fallback.get("reachable"):
+            http_fallback["tls_failed"] = http.get("exception") == "SSLError"
             http = http_fallback
-    evidence = _evidence(registered, http) if registered else None
+    evidence = _evidence(registered, http, age=domain_age_days(registered) if http.get("tls_valid") else None) if registered else None
     # If the submitted domain exists, also look for a close Tranco-listed domain
     # only when the label is a likely typo. The suggestion is still gated by all checks.
     suggestions = []
